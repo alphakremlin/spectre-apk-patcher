@@ -1,0 +1,18 @@
+{
+  "name": "Qonversion",
+  "detect": ["io/qonversion/", "com/qonversion/"],
+  "patches": [
+    {
+      "file": "io/qonversion/sandwich/QonversionSandwich.smali",
+      "method": "isActive",
+      "returns": "Z",
+      "value": true
+    },
+    {
+      "file": "io/qonversion/android/sdk/dto/QPermission.smali",
+      "method": "isActive",
+      "returns": "Z",
+      "value": true
+    }
+  ]
+}

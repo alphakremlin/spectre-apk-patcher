@@ -1,0 +1,18 @@
+{
+  "name": "Google Play Billing",
+  "detect": ["com/android/billingclient/", "com/google/android/gms/auth/api/"],
+  "patches": [
+    {
+      "file": "com/android/billingclient/api/Purchase.smali",
+      "method": "isAcknowledged",
+      "returns": "Z",
+      "value": true
+    },
+    {
+      "file": "com/android/billingclient/api/Purchase.smali",
+      "method": "isAutoRenewing",
+      "returns": "Z",
+      "value": true
+    }
+  ]
+}

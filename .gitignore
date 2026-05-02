@@ -1,0 +1,7 @@
+*.apk
+*.xapk
+*.idsig
+*.keystore
+work_*/
+__pycache__/
+*.pyc

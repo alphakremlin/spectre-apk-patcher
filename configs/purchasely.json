@@ -1,0 +1,12 @@
+{
+  "name": "Purchasely",
+  "detect": ["io/purchasely/", "com/purchasely/"],
+  "patches": [
+    {
+      "file": "io/purchasely/models/PLYSubscription.smali",
+      "method": "isActive",
+      "returns": "Z",
+      "value": true
+    }
+  ]
+}

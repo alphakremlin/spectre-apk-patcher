@@ -1,0 +1,18 @@
+{
+  "name": "Apphud",
+  "detect": ["com/apphud/"],
+  "patches": [
+    {
+      "file": "com/apphud/sdk/domain/models/ApphudSubscription.smali",
+      "method": "isActive",
+      "returns": "Z",
+      "value": true
+    },
+    {
+      "file": "com/apphud/sdk/domain/models/ApphudSubscription.smali",
+      "method": "isAutoRenewEnabled",
+      "returns": "Z",
+      "value": true
+    }
+  ]
+}

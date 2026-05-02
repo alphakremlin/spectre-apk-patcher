@@ -1,0 +1,12 @@
+{
+  "name": "Superwall",
+  "detect": ["com/superwall/", "com/superwall/sdk/"],
+  "patches": [
+    {
+      "file": "com/superwall/sdk/store/abstractions/product/RawStoreProduct.smali",
+      "method": "isSubscription",
+      "returns": "Z",
+      "value": true
+    }
+  ]
+}

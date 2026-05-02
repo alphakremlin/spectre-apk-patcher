@@ -1,0 +1,24 @@
+{
+  "name": "RevenueCat",
+  "detect": ["com/revenuecat/purchases/"],
+  "patches": [
+    {
+      "file": "com/revenuecat/purchases/EntitlementInfo.smali",
+      "method": "isActive",
+      "returns": "Z",
+      "value": true
+    },
+    {
+      "file": "com/revenuecat/purchases/EntitlementInfo.smali",
+      "method": "getIsActive",
+      "returns": "Z",
+      "value": true
+    },
+    {
+      "file": "com/revenuecat/purchases/VerificationResult.smali",
+      "method": "isVerified",
+      "returns": "Z",
+      "value": true
+    }
+  ]
+}

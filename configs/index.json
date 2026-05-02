@@ -1,0 +1,11 @@
+{
+  "sdks": [
+    "revenuecat",
+    "google_billing",
+    "adapty",
+    "qonversion",
+    "apphud",
+    "purchasely",
+    "superwall"
+  ]
+}
