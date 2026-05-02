@@ -15,6 +15,8 @@ import re
 import json
 import subprocess
 import argparse
+import zipfile
+import shutil
 from pathlib import Path
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
@@ -312,26 +314,79 @@ def sign(unsigned: Path, signed: Path) -> bool:
     if ok: print(f"   → {signed}")
     return ok
 
+# ── XAPK handling ─────────────────────────────────────────────────────────────
+
+def extract_base_from_xapk(xapk: Path, out_dir: Path) -> tuple[Path, str]:
+    """
+    Extract the base APK from an XAPK.
+    Returns (base_apk_path, base_entry_name).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(xapk) as z:
+        entries = z.namelist()
+        # Base APK is the one named after the package or just 'base.apk'
+        base_entry = next(
+            (e for e in entries if e.endswith(".apk") and
+             not e.startswith("config.")), None
+        )
+        if not base_entry:
+            raise RuntimeError("No base APK found inside XAPK")
+        dest = out_dir / "base.apk"
+        with z.open(base_entry) as src, open(dest, "wb") as dst:
+            dst.write(src.read())
+        print(f"   Extracted base: {base_entry} → {dest}")
+        return dest, base_entry
+
+def rebuild_xapk(original_xapk: Path, patched_base: Path,
+                 base_entry_name: str, out_xapk: Path):
+    """
+    Rebuild XAPK replacing only the base APK with the patched version.
+    All config splits (native libs, density, language) stay intact.
+    """
+    print(f"\n📦 Rebuilding XAPK ...")
+    with zipfile.ZipFile(out_xapk, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        with zipfile.ZipFile(original_xapk) as zin:
+            for entry in zin.namelist():
+                if entry == base_entry_name:
+                    zout.write(patched_base, entry)
+                    print(f"   ✅ Replaced {entry} with patched version")
+                else:
+                    zout.writestr(entry, zin.read(entry))
+    size = out_xapk.stat().st_size / 1e6
+    print(f"   → {out_xapk} ({size:.1f} MB)")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     print_banner()
     parser = argparse.ArgumentParser(description="SPECTRE — APK Premium Patcher")
-    parser.add_argument("apk", help="Path to input APK")
+    parser.add_argument("apk", help="Path to input .apk or .xapk")
     parser.add_argument("--dry-run", action="store_true",
                         help="Scan only — no writes")
     parser.add_argument("--app-only", action="store_true",
                         help="Pattern scan only the app's own package")
     args = parser.parse_args()
 
-    apk      = Path(args.apk).resolve()
-    stem     = apk.stem
+    input_path = Path(args.apk).resolve()
+    if not input_path.exists():
+        print(f"❌ File not found: {input_path}"); sys.exit(1)
+
+    # ── XAPK: extract base APK first ──────────────────────────────────────────
+    is_xapk = input_path.suffix.lower() == ".xapk"
+    xapk_base_entry = None
+
+    if is_xapk:
+        print(f"\n📂 XAPK detected — extracting base APK ...")
+        xapk_tmp = Path(f"xapk_tmp_{input_path.stem}")
+        apk, xapk_base_entry = extract_base_from_xapk(input_path, xapk_tmp)
+    else:
+        apk = input_path
+
+    stem     = input_path.stem
     work     = Path(f"work_{stem}")
     unsigned = Path(f"{stem}_unsigned.apk")
     signed   = Path(f"{stem}_patched.apk")
-
-    if not apk.exists():
-        print(f"❌ File not found: {apk}"); sys.exit(1)
+    out_xapk = Path(f"{stem}_patched.xapk")
 
     pkg = get_package_name(apk)
     if pkg: print(f"📱 Package: {pkg}")
@@ -354,7 +409,7 @@ def main():
             for p in sdk_patches: print(p)
         all_patches.extend(sdk_patches)
 
-    # 3. Pattern-based scan (app namespace + unrecognised classes)
+    # 3. Pattern-based scan
     print("\n🔍 Pattern scanning smali ...")
     for smali_dir in work.glob("smali*"):
         for smali_file in smali_dir.rglob("*.smali"):
@@ -377,14 +432,26 @@ def main():
     if not all_patches:
         print("\n⚠️  Nothing to patch."); sys.exit(0)
 
-    # 4. Build + sign
+    # 4. Build + sign patched base APK
     if not build(work, unsigned): sys.exit(1)
     if not sign(unsigned, signed): sys.exit(1)
     unsigned.unlink(missing_ok=True)
 
-    size = signed.stat().st_size / 1_000_000
-    print(f"\n✅ Done → {signed}  ({size:.1f} MB)")
-    print(f"   cp {signed} /sdcard/ && tap to install")
+    # 5. If XAPK — inject patched base back, output .xapk for SAI
+    if is_xapk:
+        rebuild_xapk(input_path, signed, xapk_base_entry, out_xapk)
+        signed.unlink(missing_ok=True)
+        shutil.rmtree(xapk_tmp, ignore_errors=True)
+        size = out_xapk.stat().st_size / 1e6
+        print(f"\n{G}✅ Done → {out_xapk}  ({size:.1f} MB){X}")
+        print(f"\n{Y}⚠️  This is a split APK — install with SAI:{X}")
+        print(f"   1. Install SAI (Split APKs Installer) from Play Store")
+        print(f"   2. cp {out_xapk} /sdcard/")
+        print(f"   3. Open SAI → Install APKs → select {out_xapk.name}")
+    else:
+        size = signed.stat().st_size / 1e6
+        print(f"\n{G}✅ Done → {signed}  ({size:.1f} MB){X}")
+        print(f"   cp {signed} /sdcard/ && tap to install")
 
 if __name__ == "__main__":
     main()
