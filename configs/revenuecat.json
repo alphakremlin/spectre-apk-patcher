@@ -19,6 +19,15 @@
       "method": "isVerified",
       "returns": "Z",
       "value": true
+    },
+    {
+      "type": "json_date_inject",
+      "file": "com/revenuecat/purchases/EntitlementInfo.smali",
+      "method": "getRawData",
+      "returns": "Lorg/json/JSONObject;",
+      "keys": ["expires_date", "grace_period_expires_date"],
+      "date": "2099-12-31T23:59:59Z",
+      "description": "For apps where native code (e.g. Qt/ObjC bridge) reads raw JSON instead of calling Java getters"
     }
   ]
 }

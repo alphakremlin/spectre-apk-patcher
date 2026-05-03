@@ -169,6 +169,8 @@ def detect_sdks(work: Path) -> list[dict]:
 
 # ── Smali patching ────────────────────────────────────────────────────────────
 
+_inject_counter = 0  # global label uniquifier
+
 def make_bool_method(sig: str, value: bool) -> str:
     val = "0x1" if value else "0x0"
     return (
@@ -179,18 +181,131 @@ def make_bool_method(sig: str, value: bool) -> str:
         ".end method\n"
     )
 
+def apply_json_date_inject(work: Path, cfg: dict, patch: dict, dry_run: bool) -> list[str]:
+    """
+    Patch a JSONObject-returning method to inject future expire dates before
+    every return statement.
+
+    Targets apps where native code (e.g. Qt/GNUstep ObjC bridge) reads raw
+    RevenueCat JSON directly instead of calling Java getters like isActive().
+    Classic symptom: isActive() patch has no effect — subscription still locked.
+
+    Strategy:
+      1. Find the target method by name + return type.
+      2. Bump .locals by 2 for two scratch string registers.
+      3. Before every return-object, inject a try/catch block that calls
+         JSONObject.put() to overwrite each date key with a far-future value.
+    """
+    global _inject_counter
+
+    rel_file    = patch["file"]
+    method_name = patch["method"]
+    return_type = patch.get("returns", "Lorg/json/JSONObject;")
+    keys        = patch.get("keys", ["expires_date", "grace_period_expires_date"])
+    future_date = patch.get("date", "2099-12-31T23:59:59Z")
+
+    results = []
+
+    method_pat = re.compile(
+        rf'(\.method[^\n]*\b{re.escape(method_name)}\(\){re.escape(return_type)}\n)'
+        rf'(.*?)'
+        rf'(\.end method)',
+        re.DOTALL
+    )
+    return_pat = re.compile(r'([ \t]*)(return-object[ \t]+(v\d+|p\d+))', re.MULTILINE)
+
+    for smali_dir in work.glob("smali*"):
+        target = smali_dir / rel_file
+        if not target.exists():
+            continue
+
+        text  = target.read_text(encoding="utf-8", errors="replace")
+        found = [0]
+
+        def patch_method(m, found=found):
+            global _inject_counter
+            sig  = m.group(1)
+            body = m.group(2)
+            end  = m.group(3)
+
+            if dry_run:
+                if return_pat.search(body):
+                    found[0] += 1
+                return m.group(0)
+
+            # Allocate 2 extra locals for key + value strings
+            loc_m = re.search(r'(\.locals\s+)(\d+)', body)
+            if loc_m:
+                n        = int(loc_m.group(2))
+                key_reg  = f'v{n}'
+                val_reg  = f'v{n + 1}'
+                body     = body.replace(loc_m.group(0), f'.locals {n + 2}', 1)
+            else:
+                key_reg, val_reg = 'v0', 'v1'
+                body = '    .locals 2\n' + body
+
+            def inject_before_return(rm):
+                global _inject_counter
+                _inject_counter += 1
+                lbl      = f'spectre_dates_{_inject_counter}'
+                indent   = rm.group(1)
+                ret_stmt = rm.group(2)
+                ret_reg  = rm.group(3)
+
+                lines = [f'{indent}:try_start_{lbl}']
+                lines.append(f'{indent}const-string {val_reg}, "{future_date}"')
+                for key in keys:
+                    lines.append(f'{indent}const-string {key_reg}, "{key}"')
+                    lines.append(
+                        f'{indent}invoke-virtual {{{ret_reg}, {key_reg}, {val_reg}}}, '
+                        f'Lorg/json/JSONObject;->put('
+                        f'Ljava/lang/String;Ljava/lang/Object;)Lorg/json/JSONObject;'
+                    )
+                lines.append(f'{indent}:try_end_{lbl}')
+                lines.append(
+                    f'{indent}.catch Lorg/json/JSONException; '
+                    f'{{:try_start_{lbl} .. :try_end_{lbl}}} :catch_{lbl}'
+                )
+                lines.append(f'{indent}:catch_{lbl}')
+                lines.append(f'{indent}{ret_stmt}')
+                found[0] += 1
+                return '\n'.join(lines)
+
+            body = return_pat.sub(inject_before_return, body)
+            return sig + body + end
+
+        new_text = method_pat.sub(patch_method, text)
+
+        if found[0]:
+            results.append(
+                f"  🗓️  [{cfg['name']}] {target.name}::{method_name}() "
+                f"→ injected future dates ({', '.join(keys)})"
+            )
+            if not dry_run:
+                target.write_text(new_text, encoding="utf-8")
+
+    return results
+
+
 def apply_sdk_patches(work: Path, sdks: list[dict], dry_run: bool) -> list[str]:
     """Apply targeted patches from SDK config files."""
     patches = []
     for cfg in sdks:
         for patch in cfg.get("patches", []):
+            patch_type = patch.get("type", "bool")
+
+            if patch_type == "json_date_inject":
+                patches.extend(apply_json_date_inject(work, cfg, patch, dry_run))
+                continue
+
+            # ── Boolean return patch (default) ────────────────────────────────
             rel_file  = patch["file"]
             method    = patch["method"]
             ret_type  = patch.get("returns", "Z")
             value     = patch["value"]
 
             if ret_type != "Z":
-                continue  # only boolean patches for now
+                continue  # only boolean patches handled here
 
             for smali_dir in work.glob("smali*"):
                 target = smali_dir / rel_file
@@ -353,9 +468,11 @@ def strip_and_resign_apk(raw: Path, keystore: Path, ks_pass: str) -> Path:
             if item.startswith("META-INF/"):
                 continue
             data = src.read(item)
-            if item.endswith(".so"):
+            if item.endswith(".so") or item == "resources.arsc":
+                # .so  → must be ZIP_STORED for mmap (native lib extraction)
+                # .arsc → must be ZIP_STORED + 4-byte aligned on API 30+
                 dst.writestr(
-                    zipfile.ZipInfo(item),   # no compress_type = STORED
+                    zipfile.ZipInfo(item),
                     data,
                     compress_type=zipfile.ZIP_STORED
                 )
