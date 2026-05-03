@@ -338,23 +338,47 @@ def extract_base_from_xapk(xapk: Path, out_dir: Path) -> tuple[Path, str]:
         return dest, base_entry
 
 def strip_and_resign_apk(raw: Path, keystore: Path, ks_pass: str) -> Path:
-    """Strip existing signature and re-sign with our keystore."""
+    """
+    Strip existing signature, re-store .so files uncompressed (required by
+    Android for native lib extraction), zipalign, then re-sign.
+    """
     stripped = raw.with_suffix(".stripped.apk")
+    aligned  = raw.with_suffix(".aligned.apk")
     signed   = raw.with_suffix(".signed.apk")
 
+    # Re-package: .so files must be ZIP_STORED (uncompressed) for Android
     with zipfile.ZipFile(raw) as src, \
-         zipfile.ZipFile(stripped, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+         zipfile.ZipFile(stripped, "w") as dst:
         for item in src.namelist():
-            if not item.startswith("META-INF/"):
-                dst.writestr(item, src.read(item))
+            if item.startswith("META-INF/"):
+                continue
+            data = src.read(item)
+            if item.endswith(".so"):
+                dst.writestr(
+                    zipfile.ZipInfo(item),   # no compress_type = STORED
+                    data,
+                    compress_type=zipfile.ZIP_STORED
+                )
+            else:
+                dst.writestr(item, data, compress_type=zipfile.ZIP_DEFLATED)
 
+    # zipalign -p 4 (page-align .so files to 4096 bytes for mmap)
+    result = subprocess.run(
+        ["zipalign", "-p", "-f", "4", str(stripped), str(aligned)],
+        capture_output=True, text=True
+    )
+    stripped.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"zipalign failed: {result.stderr[:300]}")
+
+    # Sign
     result = subprocess.run([
         "apksigner", "sign",
         "--ks", str(keystore), "--ks-pass", f"pass:{ks_pass}",
-        "--out", str(signed), str(stripped),
+        "--out", str(signed), str(aligned),
     ], capture_output=True, text=True)
 
-    stripped.unlink(missing_ok=True)
+    aligned.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(f"apksigner failed: {result.stderr[:300]}")
     return signed
