@@ -337,21 +337,67 @@ def extract_base_from_xapk(xapk: Path, out_dir: Path) -> tuple[Path, str]:
         print(f"   Extracted base: {base_entry} → {dest}")
         return dest, base_entry
 
+def strip_and_resign_apk(raw: Path, keystore: Path, ks_pass: str) -> Path:
+    """Strip existing signature and re-sign with our keystore."""
+    stripped = raw.with_suffix(".stripped.apk")
+    signed   = raw.with_suffix(".signed.apk")
+
+    with zipfile.ZipFile(raw) as src, \
+         zipfile.ZipFile(stripped, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for item in src.namelist():
+            if not item.startswith("META-INF/"):
+                dst.writestr(item, src.read(item))
+
+    result = subprocess.run([
+        "apksigner", "sign",
+        "--ks", str(keystore), "--ks-pass", f"pass:{ks_pass}",
+        "--out", str(signed), str(stripped),
+    ], capture_output=True, text=True)
+
+    stripped.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"apksigner failed: {result.stderr[:300]}")
+    return signed
+
 def rebuild_xapk(original_xapk: Path, patched_base: Path,
-                 base_entry_name: str, out_xapk: Path):
+                 base_entry_name: str, out_xapk: Path,
+                 keystore: Path, ks_pass: str):
     """
-    Rebuild XAPK replacing only the base APK with the patched version.
-    All config splits (native libs, density, language) stay intact.
+    Rebuild XAPK with patched base APK.
+    Re-signs ALL splits with the same keystore so signatures are consistent.
+    (Mismatched signatures cause INSTALL_FAILED_INVALID_APK on SAI.)
     """
-    print(f"\n📦 Rebuilding XAPK ...")
-    with zipfile.ZipFile(out_xapk, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-        with zipfile.ZipFile(original_xapk) as zin:
-            for entry in zin.namelist():
-                if entry == base_entry_name:
-                    zout.write(patched_base, entry)
-                    print(f"   ✅ Replaced {entry} with patched version")
-                else:
-                    zout.writestr(entry, zin.read(entry))
+    print(f"\n📦 Rebuilding XAPK — re-signing all splits ...")
+    tmp = out_xapk.parent / f"_resign_tmp_{out_xapk.stem}"
+    tmp.mkdir(exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(out_xapk, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            with zipfile.ZipFile(original_xapk) as zin:
+                for entry in zin.namelist():
+                    if not entry.endswith(".apk"):
+                        zout.writestr(entry, zin.read(entry))
+                        continue
+
+                    raw = tmp / entry.replace("/", "_")
+                    if entry == base_entry_name:
+                        # Use the already-patched+signed base
+                        shutil.copy2(patched_base, raw)
+                    else:
+                        raw.write_bytes(zin.read(entry))
+
+                    try:
+                        resigned = strip_and_resign_apk(raw, keystore, ks_pass)
+                        zout.write(resigned, entry)
+                        print(f"   ✅ {entry}")
+                        resigned.unlink(missing_ok=True)
+                    except RuntimeError as e:
+                        print(f"   ⚠️  {entry} — {e} (using original)")
+                        zout.write(raw, entry)
+                    raw.unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     size = out_xapk.stat().st_size / 1e6
     print(f"   → {out_xapk} ({size:.1f} MB)")
 
@@ -439,7 +485,8 @@ def main():
 
     # 5. If XAPK — inject patched base back, output .xapk for SAI
     if is_xapk:
-        rebuild_xapk(input_path, signed, xapk_base_entry, out_xapk)
+        rebuild_xapk(input_path, signed, xapk_base_entry, out_xapk,
+                     Path("patch.keystore"), "patch123")
         signed.unlink(missing_ok=True)
         shutil.rmtree(xapk_tmp, ignore_errors=True)
         size = out_xapk.stat().st_size / 1e6
