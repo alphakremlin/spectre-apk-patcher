@@ -241,8 +241,9 @@ def apply_json_date_inject(work: Path, cfg: dict, patch: dict, dry_run: bool) ->
                 val_reg  = f'v{n + 1}'
                 body     = body.replace(loc_m.group(0), f'.locals {n + 2}', 1)
             else:
-                key_reg, val_reg = 'v0', 'v1'
-                body = '    .locals 2\n' + body
+                # Can't safely inject without knowing register count — skip
+                print(f"   ⚠️  No .locals in {method_name}() — skipping date inject")
+                return m.group(0)
 
             def inject_before_return(rm):
                 global _inject_counter
@@ -259,7 +260,7 @@ def apply_json_date_inject(work: Path, cfg: dict, patch: dict, dry_run: bool) ->
                     lines.append(
                         f'{indent}invoke-virtual {{{ret_reg}, {key_reg}, {val_reg}}}, '
                         f'Lorg/json/JSONObject;->put('
-                        f'Ljava/lang/String;Ljava/lang/Object;)Lorg/json/JSONObject;'
+                        f'Ljava/lang/String;Ljava/lang/String;)Lorg/json/JSONObject;'
                     )
                 lines.append(f'{indent}:try_end_{lbl}')
                 lines.append(
@@ -389,14 +390,7 @@ def get_package_name(apk: Path) -> str:
 
 def decompile(apk: Path, out: Path) -> bool:
     if out.exists():
-        for root, dirs, files in os.walk(out, topdown=False):
-            for f in files:
-                os.remove(os.path.join(root, f))
-            for d in dirs:
-                try: os.rmdir(os.path.join(root, d))
-                except OSError: pass
-        try: out.rmdir()
-        except OSError: pass
+        shutil.rmtree(out)
     print(f"\n📦 Decompiling {apk.name} ...")
     ok = run(["apktool", "d", "-f", "-r", str(apk), "-o", str(out)], "apktool d")
     if ok: print(f"   → {out}/")
@@ -471,11 +465,9 @@ def strip_and_resign_apk(raw: Path, keystore: Path, ks_pass: str) -> Path:
             if item.endswith(".so") or item == "resources.arsc":
                 # .so  → must be ZIP_STORED for mmap (native lib extraction)
                 # .arsc → must be ZIP_STORED + 4-byte aligned on API 30+
-                dst.writestr(
-                    zipfile.ZipInfo(item),
-                    data,
-                    compress_type=zipfile.ZIP_STORED
-                )
+                info = src.getinfo(item)
+                info.compress_type = zipfile.ZIP_STORED
+                dst.writestr(info, data)
             else:
                 dst.writestr(item, data, compress_type=zipfile.ZIP_DEFLATED)
 
